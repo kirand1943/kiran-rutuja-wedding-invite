@@ -1,0 +1,608 @@
+/* =====================================================================
+   main.js — Kiran weds Rutuja · scroll-driven wedding invitation
+   ---------------------------------------------------------------------
+   1. CONFIG            all event details / links / RSVP settings (edit here)
+   2. DOM population    props, petals, umbrellas …
+   3. Scene 0           tap-to-open envelope + the opening "assembly"
+   4. Master timeline   ONE GSAP timeline scrubbed by scroll (scenes 1 → 8)
+   5. Extras            countdown, bell chime, ambient sound, flashes, RSVP
+
+   Couple artwork lives in assets/couple/*.webp (cut from the collection sheet by
+   tools/cut_couple.py). Same two people everywhere — only the outfit art changes per event.
+   ===================================================================== */
+import * as Art from "./art.js";
+
+/* ───────────────────────── 1. CONFIG ───────────────────────── */
+const CONFIG = {
+    //   Change it here once and the page text + countdown both follow.
+    muhurtham: { label: "7:05 AM to 7:30 AM", iso: "2026-12-14T07:05:00+05:30" },
+    venue: "Kshana by the Sea",          // [PLACEHOLDER from brief — confirm]
+    city: "Kapu, Udupi Dist.",
+    maps: {
+        wedding: "https://www.google.com/maps/place//data=!4m2!3m1!1s0x3bbcb1ae6b47d05f:0xc3dc2e1fccef0f86?sa=X&ved=1t:8290&ictx=111",
+    },
+    reception: {
+        date: "19 December 2026",
+        short: "19 Dec",
+        venue: "SRK Grandeur Convention Centre",
+        city: "Mysuru",
+        time: "7:00 PM onwards",
+        map: "https://www.google.com/maps/place//data=!4m2!3m1!1s0x3baf7b3af61666a7:0xbeac56a1a34045b3?sa=X&ved=1t:8290&ictx=111",
+    },
+    rsvp: {
+        // Google Sheet via the Apps Script web app in apps-script/rsvp.gs (setup steps are at the top of that file).
+        // Paste the "Web app URL" here. Leave empty and the form falls back to WhatsApp.
+        endpoint: "https://script.google.com/macros/s/AKfycbysEvRoZRX0go6EhOFUOAXWEWCJLAOSE7U5uz0eAAVotZCKURTkjV9NIKiH-1wgNVff9Q/exec",
+        whatsapp: "918867347911",           // [PLACEHOLDER] country code + number, digits only
+        deadline: "Please reply by 15 November", // e.g. "Please reply by 15 November"
+    },
+};
+
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const gsap = window.gsap;
+gsap.registerPlugin(window.ScrollTrigger);
+const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+history.scrollRestoration = "manual";
+
+const frame = $("#frame");
+const rand = (a, b) => a + Math.random() * (b - a);
+
+/* ───────────────────────── 2. DOM population ───────────────────────── */
+$$("[data-muhurtham]").forEach((e) => (e.textContent = CONFIG.muhurtham.label));
+$$("[data-venue]").forEach((e) => (e.textContent = CONFIG.venue));
+$$("[data-venue-city]").forEach((e) => (e.textContent = CONFIG.city));
+$$("[data-reception-city]").forEach((e) => (e.textContent = CONFIG.reception.city));
+CONFIG.maps.reception = CONFIG.reception.map;
+$$("[data-reception-date]").forEach((e) => (e.textContent = CONFIG.reception.date));
+$$("[data-reception-venue]").forEach((e) => (e.textContent = CONFIG.reception.venue));
+$$("[data-reception-time]").forEach((e) => (e.textContent = CONFIG.reception.time));
+$$("[data-reception-short]").forEach((e) => (e.textContent = CONFIG.reception.short));
+$$("[data-map]").forEach((a) => (a.href = CONFIG.maps[a.dataset.map]));
+
+$("#fps").innerHTML = Art.footprints(8);
+$("#archArt").innerHTML = Art.arch();
+$("#mapArt").innerHTML = Art.mapIllustration();
+$("#mandapArt").innerHTML = Art.mandap();
+
+// petals for scene 3 / 4
+const petalsEl = $("#petals");
+for (let i = 0; i < 26; i++) {
+    const p = document.createElement("i");
+    p.className = "petal";
+    p.style.left = (Math.random() * 100).toFixed(1) + "%";
+    petalsEl.appendChild(p);
+}
+const petals = $$(".petal");
+
+// soft chandelier-light twinkles for the Reception stage
+for (let i = 0; i < 22; i++) {
+    const s = document.createElement("i");
+    s.style.cssText = `left:${rand(8, 92).toFixed(1)}%;top:${rand(3, 40).toFixed(1)}%;--d:${rand(2, 5).toFixed(1)}s;--delay:${(-rand(0, 4)).toFixed(1)}s;transform:scale(${rand(0.6, 1.8).toFixed(2)})`;
+    $("#rcSparkles").appendChild(s);
+}
+
+// lazy images for later scenes (kept off the critical path)
+const lazyLoad = () => $$("img[data-src]").forEach((img, i) => setTimeout(() => { img.src = img.dataset.src; }, i * 90));
+
+/* ───────────────────────── camera + helpers ───────────────────────── */
+const world = $("#world");
+const cam = { z: 1.8 };
+const applyCam = () => {
+    gsap.set(world, { scale: cam.z });
+    const fg = 1 + (cam.z - 1) * 0.6;
+    gsap.set("#standWrap", { scale: fg });
+    gsap.set("#banana", { scale: fg });
+};
+applyCam();
+
+let W = 0, H = 0, opened = false;
+const measure = () => { W = frame.clientWidth; H = frame.clientHeight; };
+/** Position/scale a pose so its FEET sit at (fx%, fy%) of the frame.
+ *  Percent units (not pixels measured at build time): on phones the frame is 100dvh and changes height when the
+ *  browser address bar hides, and percentages follow it with no re-measuring. The element is anchored by its
+ *  bottom-centre (xPercent/yPercent), so left/top is exactly where the feet are. */
+const feet = (fx, fy, s = 1) => ({ left: `${fx}%`, top: `${fy}%`, scale: s });
+const anchorFeet = { xPercent: -50, yPercent: -100, x: 0, y: 0 };
+/** Foreground pieces start parked beyond their corner; the opening tween brings them home. */
+const parkIntro = () => {
+    measure();
+    gsap.set("#introL", { x: -W * 0.45, y: H * 0.22 });
+    gsap.set("#introR", { x: W * 0.45, y: H * 0.22 });
+    gsap.set("#hang", { y: -H * 0.32 });
+};
+
+/* ───────────────────────── 3. Scene 0 — tap to open ───────────────────────── */
+$("#opener").addEventListener("click", () => {
+    if (opened) return;
+    opened = true;
+    setAmbient(true);                       // the tap is the user gesture browsers need: music starts by default
+    lazyLoad();
+    const t = gsap.timeline({
+        onComplete: () => {
+            document.body.classList.remove("locked");
+            window.scrollTo(0, 0);
+            ScrollTrigger.refresh();
+            armCue();
+        },
+    });
+    t.to(".opener-text", { y: -30, autoAlpha: 0, duration: 0.7, ease: "power2.in" })
+        .to(".ring", { scale: 2.4, autoAlpha: 0, duration: 0.7 }, 0)
+        .to(".door-l", { rotationY: -112, duration: 2.4, ease: "power3.inOut" }, 0.5)
+        .to(".door-r", { rotationY: 112, duration: 2.4, ease: "power3.inOut" }, 0.5)
+        .fromTo(cam, { z: 1.15 }, { z: 1.8, duration: 3.4, ease: "power2.out", onUpdate: applyCam }, 0.5)
+        // the scene "assembles": each prop glides in from its own corner as the doors part
+        .to("#introL", { x: 0, y: 0, duration: 2.2, ease: "power3.out" }, 1.1)
+        .to("#introR", { x: 0, y: 0, duration: 2.2, ease: "power3.out" }, 1.3)
+        .to("#hang", { y: 0, duration: 2.2, ease: "power3.out" }, 1.5)
+        .to("#walkers", { autoAlpha: 1, duration: 1.8, ease: "power1.out" }, 2.4)
+        .set(".opener", { autoAlpha: 0 })
+        .to("#mute", { autoAlpha: 1, duration: 1 }, 3);
+});
+
+/* ───────────────────────── 4. Master timeline ───────────────────────── */
+let master, st;
+const T_END = 82;
+const WALK = { y0: 95 };                         // where the couple's feet start on the sand (% of frame height)
+
+function build() {
+    measure();
+    if (master) { master.scrollTrigger && master.scrollTrigger.kill(); master.kill(); }
+
+    const w1 = $("#walkers");
+    const fps = $$(".fp");
+    const E = "power1.inOut";
+
+    master = gsap.timeline({
+        defaults: { ease: "none" },
+        scrollTrigger: { trigger: "#scroll-space", start: "top top", end: "bottom bottom", scrub: reduced ? true : 0.8, invalidateOnRefresh: true },
+    });
+    const tl = master;
+    st = tl.scrollTrigger;
+    const show = (t, at, d = 1.2, vars = {}) => tl.to(t, { autoAlpha: 1, duration: d, ...vars }, at);
+    const hide = (t, at, d = 1.2, vars = {}) => tl.to(t, { autoAlpha: 0, duration: d, ...vars }, at);
+
+    /* ---- initial positions ---- */
+    gsap.set(w1, { ...anchorFeet, ...feet(50, WALK.y0, 1), autoAlpha: opened ? 1 : 0, transformOrigin: "50% 100%" });
+    gsap.set(["#benchSet", ".seated", ".fp", "#wash", "#haze"], { autoAlpha: 0 });
+    gsap.set(".mari", { autoAlpha: 1 });
+
+    /* ============ SCENE 1 · LANDING (0 → 14) ============ */
+    tl.fromTo(cam, { z: 1.8 }, { z: 1.2, duration: 14, ease: E, onUpdate: applyCam }, 0);
+    tl.to(w1, { ...feet(52, 88.6, 0.5), duration: 14, ease: "power1.out" }, 0);   // fx 50→52, fy y0→88.6, scale 1→0.5
+    // every print lands exactly where the couple's feet are at that moment of the walk (same easing as the walk)
+    fps.forEach((fp, k) => {
+        const i = k >> 1, groom = k % 2 === 0, tt = 0.8 + i * 1.45;
+        const u = Math.min(1, tt / 14), e = 1 - (1 - u) * (1 - u);            // power1.out
+        const fx = 50 + 2 * e, fy = WALK.y0 + (88.6 - WALK.y0) * e, s = 1 - 0.5 * e;
+        const dx = groom ? (i % 2 ? 6.2 : 9.2) : (i % 2 ? -1.9 : -5.2);          // feet positions across the figure, in cqw at scale 1
+        gsap.set(fp, { left: `${(fx + dx * s).toFixed(2)}%`, top: `${(fy - (groom ? 1.5 : 0.8) * s).toFixed(2)}%`, "--s": s.toFixed(3), "--r": `${(i % 2 ? 4 : -4) * (groom ? 1 : -1)}deg` });
+        tl.to(fp, { autoAlpha: 0.75, duration: 0.5 }, tt);
+    });
+    tl.to("#wash", { autoAlpha: 1, duration: 1.4 }, 11.6).to("#wash", { autoAlpha: 0, duration: 1.4 }, 13);
+    tl.to(fps, { autoAlpha: 0, duration: 1.6, stagger: 0.05 }, 12.2);
+    /* ============ SCENE 2 · THE BENCH (14 → 28) ============ */
+    tl.to(cam, { z: 1.75, duration: 9, ease: E, onUpdate: applyCam }, 14);
+    tl.to("#haze", { autoAlpha: 0.6, duration: 7 }, 14);
+    tl.fromTo("#benchSet", { y: H * 0.03 }, { y: 0, autoAlpha: 1, duration: 3 }, 12.5);
+    tl.to(w1, { ...feet(52, 88.1, 0.5), duration: 5, ease: E }, 14.6);
+    tl.to(w1, { autoAlpha: 0, duration: 0.8 }, 20).to(".seated", { autoAlpha: 1, duration: 0.8 }, 20);
+    tl.fromTo("#t2", { y: 16 }, { y: 0, autoAlpha: 1, duration: 2.4 }, 18);
+    tl.to("#t2", { autoAlpha: 0, y: -10, duration: 1.4 }, 26.6);
+
+    /* ============ SCENE 3 · MUHURTHAM / VARMALA (28 → 44) ============ */
+    tl.to(["#benchSet", "#haze"], { autoAlpha: 0, duration: 1.6 }, 27.2);
+    tl.to(w1, { autoAlpha: 0, duration: 0.1 }, 27);
+    tl.to(["#introL", "#introR"], { autoAlpha: 0, duration: 2 }, 28);
+    tl.to(cam, { z: 1.2, duration: 3, ease: E, onUpdate: applyCam }, 27.5);
+    show("#s3", 28, 3);
+    tl.fromTo("#mandapArt", { scale: 0.92, transformOrigin: "50% 100%" }, { scale: 1, duration: 4, ease: "power1.out" }, 28);
+    tl.fromTo("#gx", { y: H * 0.04, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 3, ease: "power1.out" }, 29);
+    tl.fromTo("#t3", { y: 16 }, { y: 0, autoAlpha: 1, duration: 2.2 }, 30);
+    /* ---- the exchange: they stand together, a soft flash, and the garlanded pose takes over ---- */
+    tl.fromTo("#gxPre", { autoAlpha: 0 }, { autoAlpha: 1, duration: 1.5 }, 29.5);
+    tl.to("#flash", { opacity: 0.85, duration: 0.7, ease: "power1.in" }, 36.6);
+    tl.to("#gxPre", { autoAlpha: 0, duration: 0.2 }, 37.3);
+    tl.fromTo("#gxDone", { autoAlpha: 0, scale: 0.97, transformOrigin: "50% 100%" }, { autoAlpha: 1, scale: 1, duration: 0.2 }, 37.3);
+    tl.to("#gxDone", { scale: 1.02, duration: 4, ease: "sine.out" }, 37.5);
+    tl.to("#flash", { opacity: 0, duration: 1.4 }, 37.5);
+    hide("#t3", 42.8, 1.2);
+
+    // petals fall in scene 3 after the exchange, then drift upward into scene 4
+    show("#petals", 37.6, 1);
+    petals.forEach((p, i) => {
+        const x0 = (Math.random() - 0.5) * 24, x1 = (Math.random() - 0.5) * 30;
+        tl.fromTo(p, { y: -H * 0.08, x: 0, rotation: 0 }, { y: H * 1.05, x: x0 * W / 100, rotation: 300 + i * 12, duration: 8, ease: "none" }, 37.6 + i * 0.22);
+        tl.fromTo(p, { y: H * 1.05, x: x0 * W / 100 }, { y: -H * 0.1, x: x1 * W / 100, rotation: -240, duration: 10, ease: "sine.inOut", immediateRender: false }, 47 + i * 0.2);
+    });
+
+    /* ============ SCENE 4 · LOCATION · COUNTDOWN · RSVP (44 → 56) ============ */
+    hide("#s3", 55.2, 1.4);          // stays on screen, softened by the veil, as the backdrop of the venue page
+    hide("#hang", 44.5, 2);
+    tl.to(cam, { z: 1.05, duration: 8, ease: E, onUpdate: applyCam }, 45);
+    show("#veil", 44.2, 2.6);
+    tl.set("#s4", { autoAlpha: 1 }, 46);
+    tl.fromTo(".map-card", { y: H * 0.03, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 1.8 }, 46);
+    tl.fromTo(".count", { y: H * 0.03, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 1.8 }, 47.2);
+    tl.to("#s4", { autoAlpha: 0, duration: 1.4 }, 54.2);
+    hide("#petals", 55, 1.2);
+
+    /* ============ SCENE 5 · TRANSITION TO THE RECEPTION (55) ============ */
+    hide("#veil", 55, 2);
+    tl.to("#cam", { autoAlpha: 0, duration: 2.4 }, 56);
+
+    /* ============ SCENE 9 · RECEPTION (56 → 68) ============ */
+    show("#s9", 55.8, 2.4);
+    tl.fromTo("#rcWrap", { y: H * 0.05, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 2.6, ease: "power2.out" }, 57.6);
+    tl.fromTo("#t9", { y: 14 }, { y: 0, autoAlpha: 1, duration: 2 }, 58.6);
+    tl.fromTo("#d9", { y: 10 }, { y: 0, autoAlpha: 1, duration: 1.8 }, 60.4);
+    hide(["#t9", "#d9"], 66.2, 1.4);
+    hide("#s9", 66.6, 1.8);
+
+    /* ============ SCENE 8 · CLOSING (68 → 82) ============ */
+    tl.fromTo("#t8", { y: 14 }, { y: 0, autoAlpha: 1, duration: 2 }, 68.8);
+    tl.fromTo("#s8c", { y: H * 0.03, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 2.2 }, 69.4);
+    tl.fromTo(".door-l", { rotationY: -112 }, { rotationY: 0, duration: 4.6, ease: "power3.inOut", immediateRender: false }, 75.6);
+    tl.fromTo(".door-r", { rotationY: 112 }, { rotationY: 0, duration: 4.6, ease: "power3.inOut", immediateRender: false }, 75.6);
+    hide("#t8", 76.8, 1.6);
+    hide("#s8c", 76.8, 1.6);
+    tl.to({}, { duration: 0.01 }, T_END); // fix total length
+
+    tl.eventCallback("onUpdate", () => {
+        const t = tl.time();
+        flashes.rc = t > 59 && t < 66.4;
+    });
+}
+
+/* ───────────────────────── 5. Extras ───────────────────────── */
+
+/* walking pose only bobs while the user scrolls */
+let movingTimer;
+addEventListener("scroll", () => {
+    document.body.classList.add("moving");
+    clearTimeout(movingTimer);
+    movingTimer = setTimeout(() => document.body.classList.remove("moving"), 160);
+}, { passive: true });
+
+/* ---- countdown ---- */
+const target = new Date(CONFIG.muhurtham.iso).getTime();
+const pad = (n) => String(Math.max(0, n)).padStart(2, "0");
+function tick() {
+    let s = Math.max(0, Math.floor((target - Date.now()) / 1000));
+    const d = Math.floor(s / 86400); s -= d * 86400;
+    const h = Math.floor(s / 3600); s -= h * 3600;
+    const m = Math.floor(s / 60); s -= m * 60;
+    $("#cd-d").textContent = String(d).padStart(2, "0");
+    $("#cd-h").textContent = pad(h);
+    $("#cd-m").textContent = pad(m);
+    $("#cd-s").textContent = pad(s);
+}
+tick();
+setInterval(tick, 1000);
+
+/* ---- audio: generated sea waves (no files) with the odd temple bell in between ----------------------------------
+   Each wave is its own event: soft, low-passed pink noise that swells and recedes (the filter opens as the wave rises
+   and closes as it drains) with a low rumble underneath, panned a little differently
+   every time. A faint continuous wash fills the gaps, and a soft bell rings now and then through a hall reverb. */
+let actx, ambientGain, ambientOn = false, bus, waveBus, musicStarted = false, pinkBuf;
+const between = (a, b) => a + Math.random() * (b - a);
+
+function ensureAudio() {
+    if (actx) return actx;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    actx = new AC();
+    ambientGain = actx.createGain(); ambientGain.gain.value = 0;
+    const comp = actx.createDynamicsCompressor();
+    comp.threshold.value = -18; comp.ratio.value = 3; comp.attack.value = 0.02; comp.release.value = 0.4;
+    ambientGain.connect(comp); comp.connect(actx.destination);
+    waveBus = actx.createGain(); waveBus.connect(ambientGain);                  // waves: dry and wide
+    bus = actx.createGain();                                                    // bells: dry + hall reverb
+    const dry = actx.createGain(); dry.gain.value = 0.7;
+    const wet = actx.createGain(); wet.gain.value = 0.55;
+    const rev = actx.createConvolver();
+    const len = Math.floor(actx.sampleRate * 3), ir = actx.createBuffer(2, len, actx.sampleRate);
+    for (let c = 0; c < 2; c++) { const d = ir.getChannelData(c); for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.5); }
+    rev.buffer = ir;
+    bus.connect(dry); dry.connect(ambientGain);
+    bus.connect(rev); rev.connect(wet); wet.connect(ambientGain);
+    // 14 s of stereo pink noise (Paul Kellet filter), end cross-faded into the start so the loop has no seam
+    const sr = actx.sampleRate, n = Math.floor(sr * 14), fade = Math.floor(sr * 0.8);
+    pinkBuf = actx.createBuffer(2, n, sr);
+    for (let c = 0; c < 2; c++) {
+        const d = pinkBuf.getChannelData(c), tmp = new Float32Array(n + fade);
+        let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
+        for (let i = 0; i < n + fade; i++) {
+            const w = Math.random() * 2 - 1;
+            b0 = 0.99886 * b0 + w * 0.0555179; b1 = 0.99332 * b1 + w * 0.0750759; b2 = 0.969 * b2 + w * 0.153852;
+            b3 = 0.8665 * b3 + w * 0.3104856; b4 = 0.55 * b4 + w * 0.5329522; b5 = -0.7616 * b5 - w * 0.016898;
+            tmp[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + w * 0.5362) * 0.11; b6 = w * 0.115926;
+        }
+        for (let i = 0; i < n; i++) d[i] = tmp[i];
+        for (let i = 0; i < fade; i++) { const k = i / fade; d[i] = tmp[i] * k + tmp[n + i] * (1 - k); }
+    }
+    return actx;
+}
+const noise = (t0, dur, offset) => {
+    const s = actx.createBufferSource(); s.buffer = pinkBuf; s.loop = true;
+    s.start(t0, offset == null ? Math.random() * 10 : offset); s.stop(t0 + dur);
+    return s;
+};
+
+/** A smooth swell shape: eases in, peaks at `at` (0..1 of the duration), then eases out slowly (no sudden jumps). */
+function swell(n, at, peak, tail = 1.3) {
+    const c = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+        const u = i / (n - 1);
+        c[i] = peak * (u < at ? Math.pow(Math.sin((Math.PI / 2) * (u / at)), 2) : Math.pow(Math.cos((Math.PI / 2) * ((u - at) / (1 - at))), 2 * tail));
+    }
+    c[0] = 0.0001; c[n - 1] = 0.0001;
+    return c;
+}
+
+/** A single wave: a soft "shhh" that eases in over ~5 s, peaks gently, then drains back over ~8 s as the water slides
+    off the sand. No roar (everything below ~150 Hz is filtered out), no thump, no abrupt jump, no hiss. */
+function wave(t0) {
+    const ctx = actx, total = between(12, 14.5), pan = between(-0.55, 0.55), size = between(0.8, 1);
+    const out = ctx.createGain(); out.gain.value = 1;
+    const p = ctx.createStereoPanner(); p.pan.setValueAtTime(pan * 0.5, t0); p.pan.linearRampToValueAtTime(pan, t0 + total * 0.4); p.pan.linearRampToValueAtTime(pan * 0.6, t0 + total);
+    out.connect(p); p.connect(waveBus);
+    const band = (lo, hi) => {
+        const h = ctx.createBiquadFilter(); h.type = "highpass"; h.frequency.value = lo; h.Q.value = 0.5;
+        const l = ctx.createBiquadFilter(); l.type = "lowpass"; l.frequency.value = hi; l.Q.value = 0.5;
+        const l2 = ctx.createBiquadFilter(); l2.type = "lowpass"; l2.frequency.value = hi * 1.3; l2.Q.value = 0.5;
+        h.connect(l); l.connect(l2); return [h, l, l2];
+    };
+    // the water itself: a gentle swell whose brightness follows its loudness
+    const [h1, l1, l1b] = band(170, 900);
+    const g1 = ctx.createGain(); g1.gain.setValueAtTime(0.0001, t0); g1.gain.setValueCurveAtTime(swell(256, 0.4, 0.62 * size), t0, total);
+    l1.frequency.setValueAtTime(420, t0); l1.frequency.setValueCurveAtTime(swell(256, 0.4, 1).map((v) => 420 + 520 * v), t0, total);
+    noise(t0, total + 0.3).connect(h1); l1b.connect(g1); g1.connect(out);
+    // the wash back down the sand: a second, softer layer that peaks a little later and lingers
+    const [h2, , l2b] = band(190, 640);
+    const g2 = ctx.createGain(); g2.gain.setValueAtTime(0.0001, t0); g2.gain.setValueCurveAtTime(swell(256, 0.55, 0.42 * size, 1.1), t0, total);
+    noise(t0, total + 0.3).connect(h2); l2b.connect(g2); g2.connect(out);
+}
+function scheduleWave() {
+    if (ambientOn) wave(actx.currentTime + 0.1);
+    setTimeout(scheduleWave, between(8000, 10500));     // a new wave every ~9 s: each one's drain overlaps the next one's swell
+}
+
+/** Temple bell (ghanta): a hard brass strike with a bright "tang", then a long, shimmering ring. The partials are
+    inharmonic (so it reads as metal, not as a musical note) and each is doubled and slightly detuned, which makes the
+    ring beat and shimmer the way cast brass does. One strike, left to ring out. */
+const TEMPLE = [[0.5, 0.18, 7], [1, 0.5, 6.5], [2.4, 0.38, 5], [3.8, 0.3, 3.4], [5.1, 0.2, 2.2], [6.7, 0.13, 1.4], [8.6, 0.08, 0.8]];
+function bellStrike(f, t0, vel) {
+    const ctx = actx;
+    // the strike: a short metallic click
+    const n = ctx.createBufferSource(); n.buffer = pinkBuf; n.start(t0, Math.random() * 9); n.stop(t0 + 0.05);
+    const bp = ctx.createBiquadFilter(); bp.type = "bandpass"; bp.frequency.value = 3600; bp.Q.value = 2.4;
+    const ng = ctx.createGain(); ng.gain.setValueAtTime(vel * 0.9, t0); ng.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.045);
+    n.connect(bp); bp.connect(ng); ng.connect(bus);
+    // the ring
+    TEMPLE.forEach(([r, a, d]) => {
+        [-1, 1].forEach((s) => {
+            const o = ctx.createOscillator(), g = ctx.createGain();
+            o.frequency.value = f * r * (1 + s * 0.0017);                       // two slightly different strings of metal: beating
+            g.gain.setValueAtTime(0.0001, t0); g.gain.linearRampToValueAtTime(a * vel * 0.5, t0 + 0.002); g.gain.exponentialRampToValueAtTime(0.0001, t0 + d);
+            o.connect(g); g.connect(bus); o.start(t0); o.stop(t0 + d + 0.1);
+        });
+    });
+}
+const BELL_PITCH = 760 + Math.random() * 120;                                    // one bell, always the same pitch
+function scheduleBell() {
+    if (ambientOn) {
+        bellStrike(BELL_PITCH, actx.currentTime + 0.2, 0.09);                    // a single, clear strike that rings out
+    }
+    setTimeout(scheduleBell, between(10000, 18000));
+}
+
+function startMusic() {
+    if (musicStarted || !actx) return;
+    musicStarted = true;
+    // a faint continuous wash so the shore never goes silent between waves
+    const lp = actx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 520;
+    const g = actx.createGain(); g.gain.value = 0.07;
+    const s = actx.createBufferSource(); s.buffer = pinkBuf; s.loop = true; s.start(0, Math.random() * 10);
+    s.connect(lp); lp.connect(g); g.connect(waveBus);
+    scheduleWave();
+    setTimeout(scheduleBell, 6000);
+}
+function chime() {
+    const ctx = ensureAudio(); if (!ctx) return;
+    if (ctx.state === "suspended") ctx.resume();
+    const t0 = ctx.currentTime;
+    [[880, 0.18], [1318.5, 0.1], [1760, 0.06], [2637, 0.035]].forEach(([f, g]) => {
+        const o = ctx.createOscillator(), a = ctx.createGain();
+        o.type = "sine"; o.frequency.value = f;
+        a.gain.setValueAtTime(0, t0); a.gain.linearRampToValueAtTime(g, t0 + 0.01); a.gain.exponentialRampToValueAtTime(0.0001, t0 + 2.6);
+        o.connect(a); a.connect(ctx.destination); o.start(t0); o.stop(t0 + 2.7);
+    });
+}
+$("#bell").addEventListener("click", () => {
+    const b = $("#bell"); b.classList.remove("ring"); void b.offsetWidth; b.classList.add("ring"); chime();
+});
+function setAmbient(on) {
+    const ctx = ensureAudio(); if (!ctx) return;
+    ambientOn = on;
+    if (ctx.state === "suspended") ctx.resume();
+    ambientGain.gain.cancelScheduledValues(ctx.currentTime);
+    ambientGain.gain.setValueAtTime(ambientGain.gain.value, ctx.currentTime);
+    ambientGain.gain.linearRampToValueAtTime(on ? 0.9 : 0, ctx.currentTime + (on ? 2.5 : 0.8));
+    if (on) startMusic();
+    $("#mute").setAttribute("aria-pressed", String(on));
+    $("#mute").setAttribute("aria-label", on ? "Turn music off" : "Turn music on");
+}
+$("#mute").addEventListener("click", () => setAmbient(!ambientOn));
+
+/* ---- scroll cue: when the guest pauses scrolling, a soft "Scroll down" hint with a moving chevron appears ---- */
+const cue = $("#scrollCue");
+let cueTimer, cueShown = false;
+const showCue = (on) => { if (on === cueShown) return; cueShown = on; gsap.to(cue, { autoAlpha: on ? 1 : 0, duration: 0.7 }); };
+function armCue() {
+    clearTimeout(cueTimer);
+    showCue(false);
+    if (!opened || (st && st.progress > 0.97)) return;      // nothing further down on the last page
+    cueTimer = setTimeout(() => { if (!dlg.open) showCue(true); }, 2200);
+}
+addEventListener("scroll", armCue, { passive: true });
+
+
+/* ---- reception camera flashes ---- */
+const flashes = { rc: false };
+
+// reception: press photographers — quick full-frame pops with a starburst where the camera is, often in bursts of two
+(function photoFlashes() {
+    setTimeout(photoFlashes, 380 + Math.random() * 1100);
+    if (!flashes.rc || reduced) return;
+    const pop = () => {
+        const b = document.createElement("i");
+        b.className = "rc-burst";
+        b.style.left = `${rand(6, 94).toFixed(1)}%`;
+        b.style.top = `${rand(58, 94).toFixed(1)}%`;
+        $("#rcBursts").appendChild(b);
+        setTimeout(() => b.remove(), 700);
+        gsap.fromTo("#rcFlash", { opacity: rand(0.28, 0.5) }, { opacity: 0, duration: 0.32, ease: "power2.out" });
+    };
+    pop();
+    if (Math.random() < 0.4) setTimeout(pop, 130 + Math.random() * 120);
+})();
+
+/* ---- RSVP → Google Sheet (Apps Script web app, see apps-script/rsvp.gs) ---------------------------
+   Guard-rails here (the script repeats every one of them server-side):
+   · names are normalised (case, accents, spacing, punctuation ignored) — same person = same row, so a repeat
+     submission UPDATES the earlier reply instead of adding a new one
+   · required fields / ranges, at least one event when accepting, no links or markup in the name
+   · honeypot field, minimum fill time, one request at a time, cooldown between sends
+   · timeout + safe retry (the server is idempotent), WhatsApp fallback if the sheet can't be reached */
+const dlg = $("#rsvp"), form = $("#rsvpForm"), status = $("#rsvpStatus"), submitBtn = form.querySelector("button[type=submit]");
+const details = $("#rsvpDetails"), hint = $("#rsvpHint");
+const LAST_KEY = "kr-rsvp-last";
+let openedAt = 0, sending = false;
+
+const cleanName = (s) => s.normalize("NFKC").replace(/\s+/g, " ").trim();
+const nameKey = (s) => cleanName(s).normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+const chosenEvents = () => $$("input[name=events]:checked", form).map((i) => i.value);
+const isAttending = () => form.attending.value === "yes";
+const readLast = () => { try { return JSON.parse(localStorage.getItem(LAST_KEY) || "null"); } catch { return null; } };
+const say = (msg, kind = "") => { status.textContent = msg; status.className = "status " + kind; };
+
+function waLink() {
+    const name = cleanName(form.name.value);
+    const names = { wedding: "Wedding", reception: "Reception" };
+    const msg = isAttending()
+        ? `Hi Kiran & Rutuja! ${name ? name + " here. " : ""}I'll be joining ${chosenEvents().map((e) => names[e]).join(", ") || "the celebrations"} (${form.guests.value} guest/s).`
+        : `Hi Kiran & Rutuja! ${name ? name + " here. " : ""}Sorry, I won't be able to make it. Wishing you both all the happiness!`;
+    return `https://wa.me/${CONFIG.rsvp.whatsapp}?text=${encodeURIComponent(msg)}`;
+}
+function syncUi() {
+    details.hidden = !isAttending();
+    $("[data-whatsapp]").href = waLink();
+}
+function validate() {
+    const name = cleanName(form.name.value);
+    if (name.length < 2 || !/\p{L}/u.test(name)) return "Please enter your full name.";
+    if (/https?:|www\.|<|>|\.com\b/i.test(name)) return "Please enter just your name.";
+    if (!form.side.value) return "Please tell us whose side you are from.";
+    if (isAttending()) {
+        if (!chosenEvents().length) return "Please tick at least one event you'll attend.";
+        const g = parseInt(form.guests.value, 10);
+        if (!(g >= 1 && g <= 8)) return "Please choose the number of guests.";
+    }
+    if (form.message.value.length > 300) return "Please keep your note under 300 characters.";
+    return "";
+}
+
+$$("[data-rsvp]").forEach((b) => b.addEventListener("click", () => {
+    openedAt = performance.now();
+    const last = readLast();
+    if (last && !form.name.value) form.name.value = last.name;
+    hint.textContent = last
+        ? `You replied as “${last.name}”. Send again with the same name and we'll simply update your reply.`
+        : "Replied before? Use the same name and we will simply update your reply.";
+    say(CONFIG.rsvp.deadline || "");
+    syncUi();
+    dlg.showModal();
+}));
+$("[data-close]").addEventListener("click", () => dlg.close());
+dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });
+form.addEventListener("input", syncUi);
+form.addEventListener("change", syncUi);
+
+async function post(payload) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 20000);
+    try {
+        // text/plain keeps this a "simple" request (no CORS pre-flight, which Apps Script cannot answer)
+        const r = await fetch(CONFIG.rsvp.endpoint, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify(payload), signal: ctl.signal });
+        return await r.json();
+    } finally { clearTimeout(timer); }
+}
+
+form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (sending) return;
+    const problem = validate();
+    if (problem) return say(problem, "err");
+    if (!CONFIG.rsvp.endpoint) return say("RSVP isn't connected yet — please use the WhatsApp link below.", "err");
+
+    const last = readLast();
+    if (last && Date.now() - last.at < 8000) return say("One moment — your reply was just sent.", "ok");
+
+    const attending = isAttending();
+    const payload = {
+        v: 1,
+        name: cleanName(form.name.value),
+        side: form.side.value,
+        attending: attending ? "yes" : "no",
+        guests: attending ? parseInt(form.guests.value, 10) : 0,
+        events: attending ? chosenEvents() : [],
+        message: form.message.value.replace(/\s+/g, " ").trim().slice(0, 300),
+        website: form.website.value,                        // honeypot: humans leave it empty
+        t: Math.round(performance.now() - openedAt),        // fill time (ms)
+    };
+
+    sending = true; submitBtn.disabled = true; say("Sending…");
+    let res = null;
+    for (let attempt = 0; attempt < 2 && !res; attempt++) {     // one safe retry: the sheet de-duplicates by name
+        try { res = await post(payload); } catch { await new Promise((r) => setTimeout(r, 900)); }
+    }
+    sending = false; submitBtn.disabled = false;
+
+    if (res && res.ok) {
+        try { localStorage.setItem(LAST_KEY, JSON.stringify({ name: payload.name, key: nameKey(payload.name), at: Date.now() })); } catch { /* private mode */ }
+        say(res.updated ? "Your reply has been updated. Thank you!" : attending ? "Thank you! We can’t wait to celebrate with you." : "Thank you for letting us know — you'll be in our hearts.", "ok");
+        setTimeout(() => dlg.close(), 2600);
+        return;
+    }
+    const msgs = {
+        invalid_name: "Please check your name and try again.",
+        invalid_side: "Please tell us whose side you are from.",
+        choose_events: "Please tick at least one event you'll attend.",
+        invalid_guests: "Please choose the number of guests.",
+        too_many: "You've sent several replies in a short time — please wait a little and try again.",
+        busy: "Many replies are coming in — please try again in a moment.",
+    };
+    say((res && msgs[res.error]) || "Couldn't reach the guest list just now — please try again, or use the WhatsApp link below.", "err");
+});
+
+/* ---- start ---- */
+// wait for the hero artwork so pose sizes are known before positioning
+await Promise.all($$("img:not([data-src])").map((i) => i.decode().catch(() => { })));
+parkIntro();
+build();
+window.__kr = { get tl() { return master; } };   // QA handle: __kr.tl.time(36) jumps to that moment
+let rz, lastW = frame.clientWidth;
+addEventListener("resize", () => {
+    clearTimeout(rz);
+    rz = setTimeout(() => {
+        // phone URL-bar show/hide only changes the height: ignore it so the story never jumps
+        if (Math.abs(frame.clientWidth - lastW) < 2) return;
+        lastW = frame.clientWidth;
+        const p = st ? st.progress : 0;
+        if (opened) { gsap.set(["#introL", "#introR", "#hang"], { x: 0, y: 0 }); } else { parkIntro(); }
+        build();
+        master.progress(p);
+        ScrollTrigger.refresh();
+    }, 250);
+});
